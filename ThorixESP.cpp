@@ -6,6 +6,7 @@
 #include <Adafruit_SH110X.h>
 #include <WiFi.h>
 #include <AsyncMQTT_ESP32.h>
+#include <EEPROM.h>
 
 /*Thorix regulation ESP32
 En priorité on s'assure qu'on ne dépasse par la valeur max en depart et que le thermostat d'ambiance donne le go
@@ -31,26 +32,30 @@ Un hysteresis Haut et bas est donné et sera à ajuster en fonction des caracté
 #define MQTT_PUB_RELAY_CIRCULATEUR "thorix/CIRCU/status"
 #define MQTT_PUB_RELAY_EV "thorix/EV/status"
 
-// Data wire is plugged into port 4 on the Arduino
+// Data wire is plugged into port 4
 const int oneWireBus = 4;   
 const int inputThAmb = 14;
-const int input1 = 12;
-const int input2 = 27;
+const int input1 = 27;
+const int input2 = 12;
 const int RelaiEV = 32;
 const int RelaiCircu = 33;
 const int RelayChaudiere = 25;
-int ThAmbiance,Button1,Button2 = 0;
+int ThAmbiance,Button1,Button2,pagemenu = 0;
 const double DelaiVeilleEcran = 60*1000;//secondes avant veille ecran
-const float TMaxDep = 40;
+const double DelaiConfig = 5*1000;
+const double DelaiLectureTemp = 10*1000;//Lecture de temperature toute les 10 secondes
+const float TMaxDep = 45;
+int OffsetTConsigneRetour;//offset consigne loi d'eau reglabe via les bouttons et stockage en EEPROM
 float TConsigneRetour;//issue de la loi d'eau en fonction de la T° exterieure
 float TConsigneRetourCirculateur = 25;//permet d'evacuer la chaleur accumulée dans l'echangeur si th ambiance vaut 0
-float THystererisConsigneRetourBas = 7;//on osccille entre consigne - bas et consigne + haut
+float THystererisConsigneRetourBas = 7;//on osccille entre consigne - bas et consigne + haut: reglable via boutons
 float THystererisConsigneRetourHaut = 1;
 float THystererisCirculateurBas= 2; 
 float THystererisCirculateurHaut = 1;
+float Tdep,Tret,Text;
 //const int Relay4 = 26;
 const int statusled = 23;//non utilisé pour le moment
-unsigned long currentMillis,StartTime,now;
+unsigned long currentMillis,DebutConfig,DebutVeille,DebutLectureTemp,now,decompte;
 bool ecranseteints = false;
 
 
@@ -64,9 +69,6 @@ String message,result,result2,result3;
 AsyncMqttClient mqttClient;
 TimerHandle_t mqttReconnectTimer;
 TimerHandle_t wifiReconnectTimer;
-
-unsigned long previousMillisForMQTT = 0;   // Stores last time temperature was published
-const long intervalMQTT = 10000;        // Interval at which to publish sensor readings
 
 void connectToWifi() {
   Serial.println("Connecting to Wi-Fi...");
@@ -112,11 +114,13 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   }
 }
 
+/*
 void onMqttPublish(uint16_t packetId) {
   Serial.println("Publish acknowledged.");
   Serial.print("  packetId: ");
   Serial.println(packetId);
 }
+*/
 
 Adafruit_SH1106G oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SSD1306 oled2(SCREEN_WIDTH, 32, &Wire, -1);
@@ -168,7 +172,7 @@ void displayTempLine(float th, String text, int offset){
   oled.write(0xF8); // Print the degrees symbol
 }
 
-void displayText1(float t_dep, float t_ret, float t_ext,float t_cons,bool ThAmb,bool RelayCirc,bool RelayEv ){
+void displayTemps(float t_dep, float t_ret, float t_ext,float t_cons,bool ThAmb,bool RelayCirc,bool RelayEv ){
   oled.clearDisplay();
   
   displayTempLine(t_dep,"DEP",0);
@@ -200,6 +204,52 @@ void displayText1(float t_dep, float t_ret, float t_ext,float t_cons,bool ThAmb,
   oled.display();
    
 }
+
+void displayConfig(int th, int min, int max, String text, unsigned long temps){  
+  oled.clearDisplay();
+  oled.setTextSize(1); 
+  oled.setCursor(0,0);
+  oled.println("Consigne");
+  oled.println(text);
+
+  oled.setCursor(16,30); 
+  //oled.setTextSize(1); 
+  oled.print("Min ");
+  oled.print(min);
+  oled.write(0xF8); 
+
+  oled.setCursor(16,40); 
+  oled.print("Max ");
+  oled.print(max);
+  oled.write(0xF8);
+
+  oled.setCursor(20,60);
+  oled.setTextSize(2); 
+  oled.print(th);
+  oled.write(0xF8);
+  
+  oled.setTextSize(1); 
+  oled.setCursor(2,100);
+  oled.println("Enreg dans");
+  oled.setCursor(25,120);
+  oled.print(temps);
+  oled.println(" s");
+  oled.display();
+}
+
+int Buttons(int value,int min, int max){
+  if (Button1 == HIGH && pagemenu != 0 && value > min && (now - DebutLectureTemp) > 200){
+      value--;
+      DebutConfig = millis();
+  }
+  if (Button2 == HIGH && pagemenu != 0 && value < max && (now - DebutLectureTemp) > 200){
+    value++;
+    DebutConfig = millis();
+  }
+
+  return value;
+}
+
 
 String RegulationEV(float Tret,float HysteresisHaut,float HysteresisBas,int Relai){
   if (Tret >= HysteresisHaut){
@@ -246,8 +296,29 @@ DeviceAddress SensorRetour = {0x28, 0x3D, 0xE2, 0x9B, 0x0E, 0x00, 0x00, 0x61};
 DeviceAddress SensorExt = {0x28, 0xFF, 0x64, 0x1F, 0x75, 0x8F, 0x59, 0x4E};
 
 void setup(void) {
+  EEPROM.begin(16);
+  OffsetTConsigneRetour = EEPROM.read(0);
+  THystererisConsigneRetourBas = EEPROM.read(1);
   // start serial port
   Serial.begin(115200);
+  Serial.println(OffsetTConsigneRetour);
+  Serial.println(THystererisConsigneRetourBas);
+
+
+  if (OffsetTConsigneRetour == 255){
+    EEPROM.write(0, 32);//valeur par défaut pour l'offset (le constructeur donne 40° à 0° exterieur)
+    EEPROM.commit();
+  }
+
+  if (THystererisConsigneRetourBas == 255){//first prog on a new chip, burn default value in EEPROM if not set
+    EEPROM.write(1, 7);
+     EEPROM.commit();
+  }
+ 
+  Serial.println(OffsetTConsigneRetour);
+  Serial.println(THystererisConsigneRetourBas);
+
+
 
   oled.begin(0x3D,true);
 
@@ -328,116 +399,122 @@ void setup(void) {
     mqttClient.onDisconnect(onMqttDisconnect);
     //mqttClient.onSubscribe(onMqttSubscribe);
     //mqttClient.onUnsubscribe(onMqttUnsubscribe);
-    mqttClient.onPublish(onMqttPublish);
+   // mqttClient.onPublish(onMqttPublish);
     mqttClient.setServer(MQTT_HOST, MQTT_PORT);
     mqttClient.setCredentials("mqttuser", "mqttuser");
     connectToWifi();
 
     displayInfos("Thorix ESP",WiFi.localIP().toString(),"");
     
-    StartTime = millis();//veille ecrans
+    DebutVeille = millis();//veille ecrans
     digitalWrite(RelaiCircu, HIGH);//Quelque soit l'etat précedent on démarre le circulateur
 }
 
 void loop(void) { 
-  //gestion veille ecrans
+
   now = millis();
-  if (now - StartTime > DelaiVeilleEcran){//devrait marcher apres 49,7 jours, gestion veille ecrans
-        if (Button1 == HIGH || Button2 == HIGH){
-            ecranseteints = false;
-            StartTime = millis();
-        }
-        else{
-            ecranseteints = true;
-        }
-  }
-  
-  if (ecranseteints){
-      oled.clearDisplay();
-      oled2.clearDisplay();
-      oled.display();
-      oled2.display();
-  }
-  
- 
-  sensors.requestTemperatures(); 
-
-  //float Tdep = sensors.getTempCByIndex(0);
-  float Tdep = sensors.getTempC(SensorDepart);
-
-  //float Tret = sensors.getTempCByIndex(1);
-  float Tret = sensors.getTempC(SensorRetour);
-
-  //float Text = sensors.getTempCByIndex(2);
-  float Text = sensors.getTempC(SensorExt);
-
-  Serial.println("Temperature depart");
-  Serial.print(Tdep);
-  Serial.println("ºC");
-
-  Serial.println("Temperature retour");
-  Serial.print(Tret);
-  Serial.println("ºC");
-
-  Serial.println("Temperature exterieure");
-  Serial.print(Text);
-  Serial.println("ºC");
-  
-  TConsigneRetour = (-0.5 * Text) + 32 ;//en pratique il semblerait que les tuyaux soient proches des carreaux, une consigne trop elevée engendre des temperatures sol > 25°, ce qui n'est plus recommandé
- 
-
   Button1 = !digitalRead(input1);
   Button2 = !digitalRead(input2);
 
-  ThAmbiance = !digitalRead(inputThAmb);//lecture du thermostat d'ambiance
+  //Gestion des pages de configuration
+  if (Button1 == HIGH || Button2 == HIGH){ 
+    Serial.println(pagemenu);   
+    if (ecranseteints){
+      ecranseteints = false;//on rallume les ecrans au premier appui 
+      DebutVeille = millis();     
+    }
+    else if (pagemenu == 0 && (now - DebutVeille) > 1000){//ecrans deja allumé:on autorise à rentrer dans les menus une seconde apres etre sortie de veille
+      Serial.println("On rentre dans les menus");
+      pagemenu = 1;
+      decompte = DelaiConfig;
+      DebutConfig = millis();
+    }              
+  }
 
+
+  if (now - DebutVeille > DelaiVeilleEcran){
+      ecranseteints = true;
+  }
+
+  if ((now - DebutConfig) > DelaiConfig && pagemenu !=0){
+    pagemenu++;//en mode config, on avance d'une page apres expiration du delai
+    if (pagemenu == 3)//on a deux menus de config
+        pagemenu=0;
+    DebutConfig = millis();
+    EEPROM.write(0, OffsetTConsigneRetour);
+    EEPROM.write(1, THystererisConsigneRetourBas);  
+    EEPROM.commit();
+    Serial.println("Commit infos en memoire");
+  }
+
+
+  if (now - DebutLectureTemp > DelaiLectureTemp){
+    DebutLectureTemp =  now;
+    //debut de la regulation de température
+    sensors.requestTemperatures(); 
+
+    //float Tdep = sensors.getTempCByIndex(0);
+    Tdep = sensors.getTempC(SensorDepart);
+
+    //float Tret = sensors.getTempCByIndex(1);
+    Tret = sensors.getTempC(SensorRetour);
+
+    //float Text = sensors.getTempCByIndex(2);
+    Text = sensors.getTempC(SensorExt);
+
+    Serial.println("Temperature depart");
+    Serial.print(Tdep);
+    Serial.println("ºC");
+
+    Serial.println("Temperature retour");
+    Serial.print(Tret);
+    Serial.println("ºC");
+
+    Serial.println("Temperature exterieure");
+    Serial.print(Text);
+    Serial.println("ºC");
+    
+    TConsigneRetour = (-0.5 * Text) + OffsetTConsigneRetour ;//en pratique il semblerait que les tuyaux soient proches des carreaux, une consigne trop elevée engendre des temperatures sol > 25°, ce qui n'est plus recommandé
   
-  if (Tdep > -10 && Tret > -10 && Text > -30){//on considere que sous ces valeurs les sondes sont HS
+  
 
-    if(ThAmbiance == HIGH && Tdep < TMaxDep){
-        
-        digitalWrite(RelaiCircu, HIGH);//on vient forcer le demarrage du circulateur
-        
-        result = RegulationEV(Tret,(TConsigneRetour + THystererisConsigneRetourHaut),(TConsigneRetour - THystererisConsigneRetourBas),RelaiEV);//regulation de l'electrovanne 
-        result2 = TConsigneRetour - THystererisConsigneRetourBas;    
-        result3= TConsigneRetour + THystererisConsigneRetourHaut;      
+    ThAmbiance = !digitalRead(inputThAmb);//lecture du thermostat d'ambiance
+   
+    if (Tdep > -10 && Tret > -10 && Text > -30){//on considere que sous ces valeurs les sondes sont HS
+
+      if(ThAmbiance == HIGH && Tdep < TMaxDep){
+          
+          digitalWrite(RelaiCircu, HIGH);//on vient forcer le demarrage du circulateur
+          
+          result = RegulationEV(Tret,(TConsigneRetour + THystererisConsigneRetourHaut),(TConsigneRetour - THystererisConsigneRetourBas),RelaiEV);//regulation de l'electrovanne 
+          result2 = TConsigneRetour - THystererisConsigneRetourBas;    
+          result3= TConsigneRetour + THystererisConsigneRetourHaut;      
+      }
+      else{
+
+          digitalWrite(RelaiEV, LOW); //on ferme l'electrovanne si le thermostat d'ambiance ne demande plus la chauffe
+          
+          if(ThAmbiance == LOW){ //Lancement régulation circulateur
+            result = RegulationCircu(Tret,(TConsigneRetourCirculateur + THystererisCirculateurHaut),(TConsigneRetourCirculateur - THystererisCirculateurBas),RelaiCircu);
+            result2 = TConsigneRetourCirculateur - THystererisCirculateurBas;    
+            result3= TConsigneRetourCirculateur + THystererisCirculateurHaut;   
+          }
+          else{
+            result = "ATTENTION";
+            result2 = "Temp depart sup a";
+            result3 =  TMaxDep;
+            displayInfos(result,result2,result3);//message prioritaire
+          }   
+      }
+
+      if (!ecranseteints)
+          displayInfos(result,result2,result3);  
     }
     else{
-
-        digitalWrite(RelaiEV, LOW); //on ferme l'electrovanne si le thermostat d'ambiance ne demande plus la chauffe
-        
-        if(ThAmbiance == LOW){ //Lancement régulation circulateur
-          result = RegulationCircu(Tret,(TConsigneRetourCirculateur + THystererisCirculateurHaut),(TConsigneRetourCirculateur - THystererisCirculateurBas),RelaiCircu);
-          result2 = TConsigneRetourCirculateur - THystererisCirculateurBas;    
-          result3= TConsigneRetourCirculateur + THystererisCirculateurHaut;   
-        }
-        else{
-          result = "ATTENTION";
-          result2 = "Temp depart sup a";
-          result3 =  TMaxDep;
-          displayInfos(result,result2,result3);//message prioritaire
-        }   
+        displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage");
+        digitalWrite(RelaiEV, LOW);
+        digitalWrite(RelaiCircu, HIGH);//permet d'ecouler la chaleur si on etait en mode veille,message prioritaire
     }
-
-    if (!ecranseteints)
-        displayInfos(result,result2,result3);  
-  }
-  else{
-      displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage");
-      digitalWrite(RelaiEV, LOW);
-      digitalWrite(RelaiCircu, HIGH);//permet d'ecouler la chaleur si on etait en mode veille,message prioritaire
-  }
-
-  if (!ecranseteints)
-    displayText1(Tdep,Tret,Text,TConsigneRetour,ThAmbiance,digitalRead(RelaiCircu),digitalRead(RelaiEV));
-
-  //poublication MQTT
- currentMillis = millis();
-
-  if (currentMillis - previousMillisForMQTT >= intervalMQTT) {
-    previousMillisForMQTT = currentMillis;
-
-    sensors.requestTemperatures(); 
 
 
     // Publish an MQTT message on topic esp32/ds18b20/temperature
@@ -448,7 +525,37 @@ void loop(void) {
     mqttClient.publish(MQTT_PUB_TH_AMBIANCE, 1, true, String(ThAmbiance).c_str());  
     mqttClient.publish(MQTT_PUB_RELAY_CIRCULATEUR, 1, true, String(digitalRead(RelaiCircu)).c_str());  
     mqttClient.publish(MQTT_PUB_RELAY_EV, 1, true, String(digitalRead(RelaiEV)).c_str());                                
-   
+  
   }
-  delay(1000);
+
+  //affichage
+  if (!ecranseteints){
+    decompte = DelaiConfig- (now - DebutConfig) +1000 ;
+
+    switch (pagemenu){
+      case 0:
+          displayTemps(Tdep,Tret,Text,TConsigneRetour,ThAmbiance,digitalRead(RelaiCircu),digitalRead(RelaiEV));
+          break;
+      case 1:          
+          OffsetTConsigneRetour = Buttons(OffsetTConsigneRetour,30,40);
+          displayConfig(OffsetTConsigneRetour,30,40,"retour",decompte/1000);
+          break;
+      case 2:
+          THystererisConsigneRetourBas = Buttons(THystererisConsigneRetourBas,1,9);//on autorise l'hysteris de -1° jusuqu'a -9°C
+          displayConfig(THystererisConsigneRetourBas,1,9,"hysteresis",decompte/1000); 
+          break;
+      default:
+          break;
+      }
+
+  }
+
+  if (ecranseteints){
+      oled.clearDisplay();
+      oled2.clearDisplay();
+      oled.display();
+      oled2.display();
+  }
+
+  delay(200);
 }
