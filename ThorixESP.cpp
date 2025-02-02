@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <AsyncMQTT_ESP32.h>
 #include <EEPROM.h>
+#include <esp_task_wdt.h>
 
 /*Thorix regulation ESP32
 En priorité on s'assure qu'on ne dépasse par la valeur max en depart et que le thermostat d'ambiance donne le go
@@ -15,6 +16,14 @@ Cette temperature de consigne de retour est issue des abaques Thorix : à 20°C 
 Ce qui nous donne pour simplifier une consigne de retour (loi d'eau) -0,5*Text+ 40
 Un hysteresis Haut et bas est donné et sera à ajuster en fonction des caractéristiques de la maison.
 */
+#define WDT_TIMEOUT 20000//Doit etre superieur à DelaiLectureTemp
+#define CONFIG_FREERTOS_NUMBER_OF_CORES 1 
+
+esp_task_wdt_config_t twdt_config = {
+        .timeout_ms = WDT_TIMEOUT,
+        .idle_core_mask = (1 << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,    // Bitmask of all cores
+        .trigger_panic = true,
+};
 
 #define WIFI_SSID ""
 #define WIFI_PASSWORD ""
@@ -296,6 +305,11 @@ DeviceAddress SensorRetour = {0x28, 0x3D, 0xE2, 0x9B, 0x0E, 0x00, 0x00, 0x61};
 DeviceAddress SensorExt = {0x28, 0xFF, 0x64, 0x1F, 0x75, 0x8F, 0x59, 0x4E};
 
 void setup(void) {
+
+  esp_task_wdt_deinit(); //wdt is enabled by default, so we need to deinit it first
+  esp_task_wdt_init(&twdt_config); //enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
+
   EEPROM.begin(16);
   OffsetTConsigneRetour = EEPROM.read(0);
   THystererisConsigneRetourBas = EEPROM.read(1);
@@ -449,6 +463,9 @@ void loop(void) {
 
 
   if (now - DebutLectureTemp > DelaiLectureTemp){
+    //reset watchdog every 
+    esp_task_wdt_reset();
+
     DebutLectureTemp =  now;
     //debut de la regulation de température
     sensors.requestTemperatures(); 
@@ -558,4 +575,5 @@ void loop(void) {
   }
 
   delay(200);
+  Serial.println(now);//permet de voir l'uptime sur la sortie serie
 }
