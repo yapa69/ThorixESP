@@ -528,9 +528,12 @@ void loop(void) {
           displayInfos(result,result2,result3);  
     }
     else{
-        displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage");
+        displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage");//ne s'affiche jamais a cause du restart derriere
         digitalWrite(RelaiEV, LOW);
         digitalWrite(RelaiCircu, HIGH);//permet d'ecouler la chaleur si on etait en mode veille,message prioritaire
+        
+        //Probleme de CEM ? on tente un reboot de l'esp32. Non détecté par le watchdog
+        esp_restart();
     }
 
 
@@ -577,3 +580,4 @@ void loop(void) {
   delay(200);
   Serial.println(now);//permet de voir l'uptime sur la sortie serie
 }
+
