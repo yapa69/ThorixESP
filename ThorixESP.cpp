@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 #include <esp_task_wdt.h>
 
-/*Thorix regulation ESP32
+/*Thorix regulation ESP32 pour HARDWARE 2.1
 En priorité on s'assure qu'on ne dépasse par la valeur max en depart et que le thermostat d'ambiance donne le go
 Ensuite, on vient asservir la temperature de retour plancher en fonction d'une consigne de retour.
 Cette temperature de consigne de retour est issue des abaques Thorix : à 20°C ext = 30°C, -10°Cext = 50° confort et 45° à - 10°C en eco
@@ -41,14 +41,14 @@ esp_task_wdt_config_t twdt_config = {
 #define MQTT_PUB_RELAY_CIRCULATEUR "thorix/CIRCU/status"
 #define MQTT_PUB_RELAY_EV "thorix/EV/status"
 
-// Data wire is plugged into port 4
-const int oneWireBus = 4;   
-const int inputThAmb = 14;
-const int input1 = 27;
-const int input2 = 12;
-const int RelaiEV = 32;
-const int RelaiCircu = 33;
-const int RelayChaudiere = 25;
+// Data wire is plugged into port 5
+const int oneWireBus = 5;   
+const int inputThAmb = 4;
+const int input1 = 13;
+const int input2 = 25;
+const int RelaiEV = 19;
+const int RelaiCircu = 18;
+//const int RelayChaudiere = 25;//not used
 int ThAmbiance,Button1,Button2,pagemenu = 0;
 const double DelaiVeilleEcran = 60*1000;//secondes avant veille ecran
 const double DelaiConfig = 5*1000;
@@ -132,7 +132,7 @@ void onMqttPublish(uint16_t packetId) {
 */
 
 Adafruit_SH1106G oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-Adafruit_SSD1306 oled2(SCREEN_WIDTH, 32, &Wire, -1);
+//Adafruit_SSD1306 oled2(SCREEN_WIDTH, 32, &Wire, -1);
 
 OneWire oneWire(oneWireBus);
 
@@ -151,18 +151,18 @@ void displayIntro(){
   oled.setCursor(10,50);
   oled.setTextSize(2); 
   oled.println("TECH");
+  oled.setTextSize(1); 
+  oled.setCursor(0,100);
+  oled.println("SW:060526");
+  oled.println("HW:V2.1");
   oled.display();
-  delay(2000);
+  delay(4000);
 }
 
 void displayInfos(String infos1,String infos2,String infos3){
-  oled2.clearDisplay();
-  oled2.setTextSize(1); 
-  oled2.setCursor(0,0);
-  oled2.println(infos1);
-  oled2.println(infos2);
-  oled2.print(infos3);
-  oled2.display();
+  Serial.println(infos1);
+  Serial.println(infos2);
+  Serial.println(infos3);
 }
 
 void displayTempLine(float th, String text, int offset){  
@@ -300,6 +300,9 @@ Found device 2 with address: 28FF641F758F594E
 */
 
 //on n' utilise pas les fonction de découverte automatique ça évite de croiser les sondes
+
+//Sonde debug: 2869A884050000A4
+//DeviceAddress SensorDepart = {0x28, 0x69, 0xA8, 0x84, 0x05, 0x00, 0x00, 0xA4};
 DeviceAddress SensorDepart = {0x28, 0x3E, 0xCD, 0x9B, 0x0E, 0x00, 0x00, 0xAF};
 DeviceAddress SensorRetour = {0x28, 0x3D, 0xE2, 0x9B, 0x0E, 0x00, 0x00, 0x61};
 DeviceAddress SensorExt = {0x28, 0xFF, 0x64, 0x1F, 0x75, 0x8F, 0x59, 0x4E};
@@ -328,29 +331,33 @@ void setup(void) {
     EEPROM.write(1, 7);
      EEPROM.commit();
   }
- 
+  Serial.println("Offset consigne de retour");
   Serial.println(OffsetTConsigneRetour);
+  Serial.println("Hystereris");
   Serial.println(THystererisConsigneRetourBas);
 
 
 
   oled.begin(0x3D,true);
 
-  if (!oled2.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  /*if (!oled2.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("failed to start SSD1306 OLED 2"));
     while (1);
   }
+  */
   
   oled.setRotation(1);
   oled.cp437(true);
   oled.setTextColor(WHITE);    // La couleur du texte
   displayIntro();
 
+/*
   oled2.clearDisplay(); // clear display
   oled2.cp437(true);
   oled2.setTextSize(1);         // set text size
   oled2.setTextColor(WHITE);    // set text color
   //oled2.setCursor(0, 2);       // set position to display (x,y)
+  */
 
   // Start up the library
   sensors.begin();
@@ -364,46 +371,6 @@ void setup(void) {
   pinMode(statusled, OUTPUT);    
 
 
-
- 
-  // Grab a count of devices on the wire
-  /*
-
-  // function to print a device address
-  void printAddress(DeviceAddress deviceAddress) {
-  for (uint8_t i = 0; i < 8; i++) {
-    if (deviceAddress[i] < 16) Serial.print("0");
-      Serial.print(deviceAddress[i], HEX);
-    }
-  }
-
-
-  numberOfDevices = sensors.getDeviceCount();
-  
-  // locate devices on the bus
-  Serial.print("Locating devices...");
-  Serial.print("Found ");
-  Serial.print(numberOfDevices, DEC);
-  Serial.println(" devices.");
-
-  // Loop through each device, print out address
-  
-  for(int i=0;i<numberOfDevices; i++) {
-    // Search the wire for address
-    if(sensors.getAddress(tempDeviceAddress, i)) {
-      Serial.print("Found device ");
-      Serial.print(i, DEC);
-      Serial.print(" with address: ");
-      printAddress(tempDeviceAddress);
-      Serial.println();
-    } else {
-      Serial.print("Found ghost device at ");
-      Serial.print(i, DEC);
-      Serial.print(" but could not detect address. Check power and cabling");
-    }
-    
-  }
-  */
     mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
     wifiReconnectTimer = xTimerCreate("wifiTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
 
@@ -430,23 +397,28 @@ void loop(void) {
   Button1 = !digitalRead(input1);
   Button2 = !digitalRead(input2);
 
+
+
+
   //Gestion des pages de configuration
-  if (Button1 == HIGH || Button2 == HIGH){ 
+  if (Button1 == HIGH || Button2 == HIGH){   
+    Serial.println(Button1);
+    Serial.println(Button2);
     Serial.println(pagemenu);   
     if (ecranseteints){
+      Serial.println("on rallume les ecrans"); 
       ecranseteints = false;//on rallume les ecrans au premier appui 
-      DebutVeille = millis();     
+      DebutVeille = now;  
     }
     else if (pagemenu == 0 && (now - DebutVeille) > 1000){//ecrans deja allumé:on autorise à rentrer dans les menus une seconde apres etre sortie de veille
       Serial.println("On rentre dans les menus");
       pagemenu = 1;
       decompte = DelaiConfig;
-      DebutConfig = millis();
+      DebutConfig = now;
     }              
   }
 
-
-  if (now - DebutVeille > DelaiVeilleEcran){
+  if ((now - DebutVeille) > DelaiVeilleEcran){
       ecranseteints = true;
   }
 
@@ -454,7 +426,7 @@ void loop(void) {
     pagemenu++;//en mode config, on avance d'une page apres expiration du delai
     if (pagemenu == 3)//on a deux menus de config
         pagemenu=0;
-    DebutConfig = millis();
+    DebutConfig = now;
     EEPROM.write(0, OffsetTConsigneRetour);
     EEPROM.write(1, THystererisConsigneRetourBas);  
     EEPROM.commit();
@@ -528,12 +500,13 @@ void loop(void) {
           displayInfos(result,result2,result3);  
     }
     else{
-        displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage");//ne s'affiche jamais a cause du restart derriere
+        displayInfos("ERREUR SONDE","Arret d'urgence","Verifier le cablage. Restart immediat");//arrive 1x/an
         digitalWrite(RelaiEV, LOW);
-        digitalWrite(RelaiCircu, HIGH);//permet d'ecouler la chaleur si on etait en mode veille,message prioritaire
-        
+        digitalWrite(RelaiCircu, HIGH);//permet d'ecouler la chaleur si on etait en mode veille,message prioritaire.
+
         //Probleme de CEM ? on tente un reboot de l'esp32. Non détecté par le watchdog
-        esp_restart();
+        delay(5000);
+        //esp_restart();
     }
 
 
@@ -572,12 +545,11 @@ void loop(void) {
 
   if (ecranseteints){
       oled.clearDisplay();
-      oled2.clearDisplay();
+     // oled2.clearDisplay();
       oled.display();
-      oled2.display();
+      //oled2.display();
   }
 
   delay(200);
-  Serial.println(now);//permet de voir l'uptime sur la sortie serie
+  //Serial.println(now);//DEBUG: permet de voir l'uptime sur la sortie serie
 }
-
